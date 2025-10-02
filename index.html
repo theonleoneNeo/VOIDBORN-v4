@@ -225,7 +225,7 @@ window.addEventListener('resize', resizeAll);
 resizeAll();
 
 /* ---------- simulation grid ---------- */
-let gridWidth = 5000, gridHeight = 3750, cellSize = 2;
+let gridWidth = 6250, gridHeight = 4688, cellSize = 2;
 
 /* camera and zoom */
 let cameraX = gridWidth/2, cameraY = gridHeight/2;
@@ -1978,7 +1978,6 @@ function enhancerInit(){
 
   const MARKET_KEYS = ["energy","mats","rare","culture","tech","exotic","artifact","gold","gem","diamond","void_essence","relic"];
 
-  /* ---------- helpers ---------- */
   function safe(id){ return document.getElementById(id); }
   const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
   function ensureSubpanel(containerId, subId, title){
@@ -1993,9 +1992,6 @@ function enhancerInit(){
     return document.getElementById(subId+'-content');
   }
 
-  /* ============================================================
-     DYNAMIC MARKETS
-  ============================================================ */
   const market = {
     prices: Object.fromEntries(MARKET_KEYS.map(k=>[k, ({
       energy:1, mats:1, rare:4, culture:2, tech:3.5, exotic:6,
@@ -2031,7 +2027,7 @@ function enhancerInit(){
   function stepMarkets(){
     for(const k of MARKET_KEYS){
       const base = market.prices[k];
-      const f = market.flow[k]||0; // + supply, - demand
+      const f = market.flow[k]||0;
       const adj = (f>0) ? (1 - market.supplyPush*f) : (1 + market.demandPull*Math.abs(f));
       const drift = 1 + (Math.random()-0.5)*market.vol;
       market.prices[k] = Math.max(0.1, base * adj * drift);
@@ -2054,9 +2050,6 @@ function enhancerInit(){
     }
   }
 
-  /* ============================================================
-     BANKING & DEBT
-  ============================================================ */
   const BANK = { baseRate: 0.015, couponInterval: 100, defaultTrustHit: 25, defaultShockKeys:["tech","mats","gold"] };
   function extendFactionFinance(f){
     if(f.treasury == null) f.treasury = 25 + Math.random()*25;
@@ -2106,9 +2099,6 @@ function enhancerInit(){
     }
   }
 
-  /* ============================================================
-     PROPAGANDA NETWORKS
-  ============================================================ */
   function extendFactionProp(f){
     if(f.propaganda == null) f.propaganda = { budget: 1 + Math.random()*2, effectiveness: 0.02 + Math.random()*0.03, enabled:true };
   }
@@ -2133,9 +2123,6 @@ function enhancerInit(){
     }
   }
 
-  /* ============================================================
-     CULTS & FAITH WARS
-  ============================================================ */
   function stepFaiths(){
     const temples = (window.buildings?.filter(b=>b.type==='temple')||[]);
     temples.forEach(t=>{
@@ -2185,9 +2172,6 @@ function enhancerInit(){
     }
   }
 
-  /* ============================================================
-     CULTURAL INVENTIONS
-  ============================================================ */
   const inventions = [];
   function randName(){
     const a = ["Song of","Treatise on","Vision of","Dance of","Ode to","Codex of","Thesis on"];
@@ -2232,19 +2216,14 @@ function enhancerInit(){
     }
   }
 
-  /* ---------- integrate pushEvent ---------- */
   window.pushEvent = function(type,msg,pos=null){ marketTap(type,msg); return _origPushEvent(type,msg,pos); };
 
-  /* ---------- tick wiring ---------- */
   let lastCouponTick = 0;
   window.update = function(){
     _origUpdate();
-
     stepMarkets();
     stepPropaganda();
-
     if(window.generation % 10 === 0){ stepFaiths(); stepInventions(); }
-
     if(window.generation - lastCouponTick >= BANK.couponInterval){
       lastCouponTick = window.generation;
       payCoupons();
@@ -2261,5 +2240,147 @@ function enhancerInit(){
 }
 </script>
 <!-- ====== END: Voidborn Five-System Enhancer ====== -->
+
+<!-- ====== BEGIN: Voidborn Peace & Trade Balance Patch ====== -->
+<script>
+(function waitForEnhancer(){
+  if (typeof window.update === 'function' && Array.isArray(window.factions) && Array.isArray(window.npcs)) {
+    installPeacePatch();
+  } else {
+    setTimeout(waitForEnhancer, 60);
+  }
+})();
+
+function installPeacePatch(){
+  const _prevUpdate = window.update;
+  const _prevPush = window.pushEvent;
+
+  const PEACE = {
+    trustDriftPerTick: 0.35,
+    allyThreshold: 65,
+    enemyClearThreshold: 45,
+    tradeRouteTarget: 12,
+    reviveChance: 0.12,
+    romanceBoost: 0.004,
+    propagandaBias: 0.8
+  };
+
+  function factionByName(name){ return window.factions.find(f=>f.name===name); }
+
+  window.pushEvent = function(type, msg, pos){
+    if(type === 'sanction'){
+      const m = msg.match(/^(.*?)\s+imposed sanctions on\s+(.*?)!$/);
+      if(m){
+        const a = factionByName(m[1]), b = factionByName(m[2]);
+        if(a && b){
+          a.sanctions?.delete?.(b.id); b.sanctions?.delete?.(a.id);
+          const rAB = a.relations?.get(b.id); if(rAB) rAB.trust = Math.min(100, rAB.trust + 12);
+          const rBA = b.relations?.get(a.id); if(rBA) rBA.trust = Math.min(100, rBA.trust + 12);
+          createTradeRouteBetween(a,b);
+        }
+      }
+      window.majorEvents.unshift(`Gen ${window.generation}: 🤝 Sanctions defused — Trade Pact formed.`);
+      return _prevPush('trade-pact', msg.replace('imposed sanctions on','signed a trade pact with'), pos);
+    }
+    if(type === 'faith-war' || type === 'coup' || type === 'swarm' || type === 'rift' || type === 'betrayal'){
+      window.__peace_revive_pool = (window.__peace_revive_pool||0) + 5;
+      window.majorEvents.unshift(`Gen ${window.generation}: 🕊️ Mediation teams deployed to de-escalate (${type}).`);
+      return _prevPush('deescalate', msg, pos);
+    }
+    return _prevPush(type, msg, pos);
+  };
+
+  function createTradeRouteBetween(f1, f2){
+    const markets = (window.buildings||[]).filter(b=>b.type==='market');
+    if(!markets.length) return false;
+    const m1 = markets.find(m=>m.faction===f1.id) || markets[Math.floor(Math.random()*markets.length)];
+    const m2 = markets.find(m=>m.faction===f2.id) || markets[Math.floor(Math.random()*markets.length)];
+    if(!m1 || !m2 || m1===m2) return false;
+    f1.tradeRoutes = f1.tradeRoutes || []; f2.tradeRoutes = f2.tradeRoutes || [];
+    if(!f1.tradeRoutes.some(r=>r.fromMarket===m1 && r.toMarket===m2)){
+      const route = {fromMarket:m1, toMarket:m2};
+      f1.tradeRoutes.push(route);
+      const route2 = {fromMarket:m2, toMarket:m1};
+      f2.tradeRoutes.push(route2);
+      _prevPush('trade', `${f1.name} and ${f2.name} established a trade route!`);
+      return true;
+    }
+    return false;
+  }
+
+  function peaceDiplomacyHeals(){
+    window.factions.forEach(f=>{
+      if(f.sanctions && f.sanctions.clear) f.sanctions.clear();
+      window.factions.forEach(o=>{
+        if(o.id===f.id) return;
+        const rel = f.relations?.get(o.id); if(!rel) return;
+        rel.trust = Math.min(100, rel.trust + PEACE.trustDriftPerTick * (PEACE.propagandaBias));
+        if(rel.trust > PEACE.enemyClearThreshold) rel.enemy = false;
+        if(rel.trust > PEACE.allyThreshold) rel.ally = true;
+      });
+    });
+  }
+
+  function ensureTradeWeb(){
+    const totalRoutes = window.factions.reduce((s,f)=>s + (f.tradeRoutes?f.tradeRoutes.length:0), 0);
+    if(totalRoutes >= PEACE.tradeRouteTarget) return;
+    const shuffled = [...window.factions].sort(()=>Math.random()-0.5);
+    for(let i=0;i<shuffled.length-1;i++){
+      if(createTradeRouteBetween(shuffled[i], shuffled[i+1])) break;
+    }
+  }
+
+  function nudgeBuilders(){
+    for(const n of window.npcs){
+      if(n.dead) continue;
+      if(n.trait==='Builder' && n.mats>4 && n.rare>1 && Math.random()<0.01){
+        const types = ['market','temple','observatory'];
+        const type = types[Math.floor(Math.random()*types.length)];
+        if(typeof window.createBuilding === 'function'){
+          window.createBuilding(type, n.x + Math.random()*8-4, n.y + Math.random()*8-4, {faith:n.faith}, n.faction);
+          n.mats -= 3; n.rare -= 1;
+          _prevPush('build', `${n.name} built a ${type}`);
+        }
+      }
+      if(n.personality){
+        n.personality.aggressive = Math.max(0, n.personality.aggressive - 0.002);
+        n.personality.loyal = Math.min(1, n.personality.loyal + 0.002);
+      }
+      if(Math.random()<PEACE.romanceBoost){
+        const rels = n.relationships;
+        if(rels && rels.size){
+          for(const r of rels.values()){ r.trust = Math.min(100, (r.trust||50) + 0.5); }
+        }
+      }
+    }
+  }
+
+  function softRevive(){
+    if(!window.__peace_revive_pool) return;
+    let revived = 0;
+    for(const n of window.npcs){
+      if(window.__peace_revive_pool<=0) break;
+      if(n.dead && Math.random()<PEACE.reviveChance){
+        n.dead = false;
+        n.energy = Math.max(60, n.energy||60);
+        window.__peace_revive_pool--;
+        revived++;
+      }
+    }
+    if(revived>0){
+      window.majorEvents.unshift(`Gen ${window.generation}: 🚑 Relief fleets stabilized ${revived} citizens.`);
+    }
+  }
+
+  window.update = function(){
+    _prevUpdate();
+    peaceDiplomacyHeals();
+    ensureTradeWeb();
+    nudgeBuilders();
+    softRevive();
+  };
+}
+</script>
+<!-- ====== END: Voidborn Peace & Trade Balance Patch ====== -->
 </body>
 </html>
